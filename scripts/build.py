@@ -25,6 +25,8 @@ OCR 校正流程（圖片、掃描檔）：
 """
 import pymupdf, sys, json, re, base64, argparse, os, subprocess, difflib, io
 
+sys.stdout.reconfigure(encoding='utf-8', errors='replace')
+sys.stderr.reconfigure(encoding='utf-8', errors='replace')
 HERE = os.path.dirname(os.path.abspath(__file__))
 ap = argparse.ArgumentParser()
 ap.add_argument('inputs', nargs='+')
@@ -42,16 +44,28 @@ IMG_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.gif')
 WORD_EXT = ('.docx', '.doc', '.rtf', '.odt')
 FW = {'１': 1, '２': 2, '３': 3, '４': 4, '５': 5}
 CIRC = {'①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5}
-LETTERS = 'ABCDE'
+LETTERS = 'ABCDEFGHㄅㄆㄇㄈㄉＡＢＣＤＥＦＧＨ'   # 代號：英文字母、注音符號或全形字母（同一行要有兩個以上才算代號選項）
+CIRC_ALL = '①②③④⑤⑥⑦⑧⑨⑩'
 CJK = lambda ch: '一' <= ch <= '鿿'
 SECTION_RE = re.compile(r'^[一二三四五六七八九十]+[、．.]')
-Q_RE = re.compile(r'^\d+\s*[.．、]')
-SUB_RE = re.compile(r'^[（(]\s*[）)]\s*[（(][１２３４５1-5][）)]')
-PREFIX_RE = re.compile(r'^\s*(\d+\s*[.．、]\s*[（(]\s*[）)]|\d+\s*[.．、]|[（(]\s*[）)]\s*[（(].[）)])\s*')
+BR = r'[（(]\s*[）)]'   # 作答括號 (   )
+Q_RE = re.compile(rf'^(\d+\s*[.．、]|{BR}\s*\d+\s*[.．、])')
+SUB_RE = re.compile(rf'^({BR}\s*([（(][１２３４５６７８９1-9][）)]|[{CIRC_ALL}])|[（(][１２３４５６７８９1-9][）)])')
+PREFIX_RE = re.compile(rf'^\s*(\d+\s*[.．、]\s*{BR}|{BR}\s*\d+\s*[.．、]|\d+\s*[.．、]|{BR}\s*[（(].[）)]|{BR}\s*[{CIRC_ALL}]|[（(][１２３４５６７８９1-9][）)])\s*')
 
 
 def cl(s):
-    return re.sub(r'\s+', '', s)
+    """去掉空白；但英文單字之間保留一個空格（Made in Taiwan）。"""
+    s = re.sub(r'\s+', ' ', s).strip()
+    return re.sub(r'(?<![A-Za-z]) | (?![A-Za-z])', '', s)
+
+
+def strip_zhuyin(s):
+    """去掉緊接在國字後面、以文字輸入的注音（例如「上ㄕㄤˋ課ㄎㄜˋ」→「上課」），避免被唸出來。"""
+    # 只刪「兩個以上注音符號」或「注音＋聲調」；單獨一個注音（ㄅ、ㄆ 代號）保留
+    Z = r'[ㄅ-ㄯㆠ-ㆿ]'
+    s = re.sub(rf'(?<=[一-鿿])\s*({Z}{{2,}}[ˊˇˋ˙]?|{Z}[ˊˇˋ˙])', '', s)
+    return re.sub(r'(?<=[一-鿿])˙', '', s)
 
 
 def union(bbs):
@@ -308,9 +322,28 @@ for pi, pg in enumerate(pages_src):
         for li, ln in enumerate(bl['lines']):
             for c, bb in ln['chars']:
                 seq.append([c, bb, li, 0])
+        # 開頭題號（例如「(   ) ①」的 ①）不算選項
+        pm = PREFIX_RE.match(''.join(x[0] for x in seq))
+        nprefix = len(pm.group(0)) if pm else 0
+        # 代號選項（A／B 或 ㄅ／ㄆ）：字母在行首或空白後、後面接中文，且同一行至少兩個
+        code_at = set()
+        for li in range(len(bl['lines'])):
+            idx = [i for i, x in enumerate(seq) if x[2] == li]
+            cand = []
+            for n, i in enumerate(idx):
+                c = seq[i][0]
+                # 注音代號不會出現在一般文字中，前面不必是空白
+                if c in LETTERS and (n == 0 or seq[idx[n-1]][0].isspace() or c in 'ㄅㄆㄇㄈㄉＡＢＣＤＥＦＧＨ'):
+                    nxt = next((seq[j][0] for j in idx[n+1:] if not seq[j][0].isspace() and seq[j][0] not in '.．、'), '')
+                    if CJK(nxt):
+                        cand.append(i)
+            if len({seq[i][0] for i in cand}) >= 2:
+                code_at.update(cand)
         owner, pending = 0, []
         for i, item in enumerate(seq):
             c = item[0]
+            if i < nprefix:
+                item[3] = 0; continue
             if c.isspace():
                 item[3] = owner; continue
             if c == '○':
@@ -320,10 +353,12 @@ for pi, pg in enumerate(pages_src):
                 new = CIRC[c]
             elif pending and c in FW:
                 new = FW[c]
-            elif c in LETTERS and (i == 0 or seq[i-1][2] != item[2] or seq[i-1][0].isspace()):
-                nxt = next((x[0] for x in seq[i+1:] if not x[0].isspace()), '')
-                if CJK(nxt):
-                    new = 10 + LETTERS.index(c)
+            elif pending and c in '12345':   # ○1 ○2（○加半形數字）
+                new = int(c)
+            elif pending and c in 'ㄅㄆㄇㄈㄉ':   # ○ㄅ ○ㄆ（圈注音代號）
+                new = 10 + LETTERS.index(c)
+            elif i in code_at:
+                new = 10 + LETTERS.index(c)
             if new is not None:
                 owner = new
             for j in pending:
@@ -345,12 +380,19 @@ for pi, pg in enumerate(pages_src):
             parts[o] = {'text': txt, 'rects': rects}
 
         st = parts.get(0, {'text': ''})['text'].strip()
-        st = re.sub(r'^(\d+)\s*[.．、]\s*[（(]\s*[）)]', r'第\1題，', st)
+        st = re.sub(rf'^(\d+)\s*[.．、]\s*{BR}', r'第\1題，', st)
+        st = re.sub(rf'^{BR}\s*(\d+)\s*[.．、]', r'第\1題，', st)
         st = re.sub(r'^(\d+)\s*[.．、]', r'第\1題，', st)
-        st = re.sub(r'^[（(]\s*[）)]\s*[（(](.)[）)]', lambda m: f'第{digit(m.group(1))}小題，', st)
-        st = re.sub(r'[（(]\s*[）)]', '括號', st)
-        st = cl(st).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('＊', '').replace('※', '')
+        st = re.sub(rf'^{BR}\s*[（(](.)[）)]', lambda m: f'第{digit(m.group(1))}小題，', st)
+        st = re.sub(rf'^{BR}\s*([{CIRC_ALL}])', lambda m: f'第{CIRC_ALL.index(m.group(1)) + 1}小題，', st)
+        st = re.sub(r'^[（(]([１２３４５６７８９1-9])[）)]', lambda m: f'第{digit(m.group(1))}小題，', st)
+        st = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', st)
+        st = re.sub(BR, '括號', st)
+        st = strip_zhuyin(st)
+        st = cl(st).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
         st = re.sub(r'_{2,}|＿{2,}', '空格', st)
+        st = re.sub(r'(\d)\s*[°∘˚]', r'\1度', st)
+        st = re.sub(r'[‧˙•·]{2,}', '，', st)
         st = st.replace('，。', '，').replace('。。', '。').lstrip('。')
         if st and st[-1] not in '。？！：」?!:':
             st += '。'
@@ -359,11 +401,14 @@ for pi, pg in enumerate(pages_src):
         for o in owners:
             if o == 0:
                 continue
-            ot = cl(parts[o]['text']).replace('○', '')
+            ot = strip_zhuyin(cl(parts[o]['text'])).replace('○', '')
             if o >= 10:
-                lab = LETTERS[o - 10]; ot = ot[1:]
+                lab = LETTERS[o - 10]; ot = ot[1:].lstrip('.．、:：')
             else:
-                lab = o; ot = re.sub(r'^[１２３４５①②③④⑤]', '', ot)
+                lab = o; ot = re.sub(r'^[１２３４５①②③④⑤1-5]', '', ot)
+            ot = re.sub(r'[‧˙•·]{2,}', '，', ot)
+            ot = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', ot)
+            ot = re.sub(BR, '括號', ot)
             ot = ot.rstrip('。')
             opts.append({'n': lab, 'say': f'{lab}，{ot}。', 'rects': parts[o]['rects']})
 
