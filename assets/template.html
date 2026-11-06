@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+  :root { --bar:#1f3b57; --hl:rgba(255,214,0,.38); --hover:rgba(0,120,255,.10); --opt:rgba(255,140,0,.35); }
+  * { box-sizing:border-box; }
+  body { margin:0; background:#e9ecef; font-family:"Microsoft JhengHei","PingFang TC",sans-serif; }
+  .fab { position:fixed; top:12px; right:12px; z-index:20; display:flex; gap:8px; align-items:flex-start; }
+  .fab > button { width:44px; height:44px; border-radius:50%; border:0; cursor:pointer; font-size:22px; line-height:1;
+         background:var(--bar); color:#fff; box-shadow:0 2px 8px rgba(0,0,0,.3); opacity:.85; }
+  .fab > button:hover { opacity:1; }
+  .fab > button.stop { background:#ff6b6b; font-size:16px; display:none; }
+  .fab > button.stop.show { display:block; }
+  .panel { position:fixed; top:64px; right:12px; z-index:20; background:var(--bar); color:#fff; border-radius:12px; padding:14px 16px;
+         box-shadow:0 4px 16px rgba(0,0,0,.35); font-size:15px; display:none; flex-direction:column; gap:12px; width:min(300px, calc(100vw - 24px)); max-height:calc(100vh - 76px); overflow-y:auto; }
+  .panel.open { display:flex; }
+  .panel label { display:flex; flex-direction:column; gap:6px; }
+  .panel .row { display:flex; align-items:center; gap:8px; }
+  .panel input[type=range] { flex:1; }
+  .panel select { font:inherit; font-size:14px; width:100%; }
+  .panel .hint { opacity:.85; font-size:13px; line-height:1.5; }
+  .pages { --z:1; padding:16px; display:flex; flex-direction:column; gap:20px; }
+  .page { position:relative; width:calc(min(100%, 1000px) * var(--z)); flex:none; margin:0 auto; background:#fff; box-shadow:0 2px 10px rgba(0,0,0,.2); }
+  .zoom { display:flex; align-items:center; gap:8px; }
+  .zoom button { width:36px; height:36px; border:0; border-radius:8px; font-size:20px; font-weight:bold; cursor:pointer; background:#ffd43b; color:#222; }
+  .zoom .reset { width:auto; padding:0 10px; font-size:14px; font-weight:normal; background:#dee2e6; }
+  .zoom output { min-width:48px; text-align:center; }
+  .page img { display:block; width:100%; height:auto; user-select:none; -webkit-user-drag:none; }
+  .blk { position:absolute; cursor:pointer; border-radius:4px; }
+  .blk:hover { background:var(--hover); outline:2px solid rgba(0,120,255,.45); }
+  .blk.on { background:var(--hl); outline:2px solid #f0a500; }
+  .opt { position:absolute; cursor:pointer; border-radius:3px; z-index:2; }
+  .opt:hover { background:rgba(255,140,0,.18); outline:2px dashed rgba(255,140,0,.8); }
+  .opt.on { background:var(--opt); }
+  .warn { display:none; background:#fff3bf; color:#5c3c00; padding:8px 16px; font-size:15px; }
+  @media print { .fab, .panel, .warn { display:none !important; } .pages { padding:0; gap:0; } .page { box-shadow:none; max-width:none; page-break-after:always; } .blk, .opt { display:none; } }
+</style>
+</head>
+<body>
+<div class="fab">
+  <button class="stop" id="stop" title="停止朗讀" aria-label="停止朗讀">■</button>
+  <button id="fs" title="全螢幕" aria-label="全螢幕">⛶</button>
+  <button id="gear" title="設定" aria-label="設定">⚙</button>
+</div>
+<div class="panel" id="panel">
+  <div style="display:flex;flex-direction:column;gap:6px">考卷大小 <span class="zoom"><button id="zOut" aria-label="縮小">－</button><output id="zV">100%</output><button id="zIn" aria-label="放大">＋</button><button class="reset" id="zReset">還原</button></span>
+    <span class="zoom"><button class="reset" id="zPage">整頁顯示</button><button class="reset" id="zWidth">符合寬度</button></span></div>
+  <label>速度 <span class="row"><input type="range" id="rate" min="0.5" max="1.4" step="0.1" value="0.9"><span id="rateV">0.9</span></span></label>
+  <label>聲音 <select id="voice"></select></label>
+  <div class="hint">點題號（藍框）＝整題一次唸完<br>點題目文字（橘框）＝只唸題目<br>點選項（橘框）＝只唸該選項</div>
+</div>
+<div class="warn" id="warn">這個瀏覽器不支援語音朗讀，請改用 Chrome 或 Edge 開啟。</div>
+<div class="pages" id="pages"></div>
+<script>
+const DATA = /*DATA*/null;
+const synth = window.speechSynthesis;
+const pagesEl = document.getElementById('pages');
+const rateEl = document.getElementById('rate'), rateV = document.getElementById('rateV');
+const voiceEl = document.getElementById('voice');
+let voices = [], activeEls = [];
+function pct(v, total) { return (v / total * 100) + '%'; }
+function place(el, r, pg, pad) {
+  el.style.left = pct(r[0] - pad, pg.w); el.style.top = pct(r[1] - pad, pg.h);
+  el.style.width = pct(r[2] - r[0] + pad * 2, pg.w); el.style.height = pct(r[3] - r[1] + pad * 2, pg.h);
+}
+
+DATA.forEach((pg, i) => {
+  const page = document.createElement('div'); page.className = 'page';
+  const img = document.createElement('img'); img.src = pg.img; img.alt = '第' + (i + 1) + '頁'; img.draggable = false;
+  page.appendChild(img);
+  pg.blocks.forEach(b => {
+    const blk = document.createElement('div'); blk.className = 'blk'; place(blk, b.box, pg, 3);
+    blk.title = '點一下朗讀';
+    blk.addEventListener('click', () => speak(b.say, [blk]));
+    page.appendChild(blk);
+    const parts = b.opts.length ? [{ n: '題目', say: b.stemSay, rects: b.stem }].concat(b.opts) : [];
+    parts.forEach(o => {
+      const els = o.rects.map(r => { const e = document.createElement('div'); e.className = 'opt'; place(e, r, pg, 1.5); page.appendChild(e); return e; });
+      els.forEach(e => {
+        e.title = o.n === '題目' ? '只唸題目' : '只唸選項 ' + o.n;
+        e.addEventListener('click', ev => { ev.stopPropagation(); speak(o.say, els); });
+        e.addEventListener('mouseenter', () => els.forEach(x => x.style.background = 'rgba(255,140,0,.18)'));
+        e.addEventListener('mouseleave', () => els.forEach(x => x.style.background = ''));
+      });
+    });
+  });
+  pagesEl.appendChild(page);
+});
+
+function loadVoices() {
+  voices = synth.getVoices().filter(v => /^zh/i.test(v.lang));
+  const pref = v => (/TW/i.test(v.lang) ? 0 : /HK/i.test(v.lang) ? 2 : 1) - (/Natural|Online|Google/i.test(v.name) ? 0.5 : 0);
+  voices.sort((a, b) => pref(a) - pref(b));
+  const saved = (() => { try { return localStorage.getItem('voice'); } catch (e) { return null; } })();
+  voiceEl.innerHTML = voices.map((v, i) => `<option value="${i}">${v.name} (${v.lang})</option>`).join('') || '<option>系統預設</option>';
+  const idx = voices.findIndex(v => v.name === saved);
+  if (idx >= 0) voiceEl.value = idx;
+}
+if (!synth) { document.getElementById('warn').style.display = 'block'; }
+else { loadVoices(); synth.onvoiceschanged = loadVoices; }
+voiceEl.onchange = () => { try { localStorage.setItem('voice', voices[voiceEl.value].name); } catch (e) {} };
+rateEl.oninput = () => rateV.textContent = rateEl.value;
+
+const stopBtn = document.getElementById('stop'), panel = document.getElementById('panel');
+document.getElementById('gear').onclick = e => { e.stopPropagation(); panel.classList.toggle('open'); };
+panel.onclick = e => e.stopPropagation();
+document.addEventListener('click', () => panel.classList.remove('open'));
+
+// 考卷放大縮小（以畫面中央為基準，放大後仍停在原本看的位置）
+const ZOOMS = [0.3, 0.4, 0.5, 0.6, 0.75, 0.9, 1, 1.25, 1.5, 1.75, 2, 2.5, 3];
+let zoom = 1;
+try { const z = parseFloat(localStorage.getItem('zoom')); if (z >= 0.2 && z <= 3) zoom = z; } catch (e) {}
+function setZoom(z, keepCenter = true) {
+  const doc = document.documentElement;
+  const cx = (scrollX + innerWidth / 2) / doc.scrollWidth, cy = (scrollY + innerHeight / 2) / doc.scrollHeight;
+  zoom = Math.max(0.2, Math.min(3, z));
+  pagesEl.style.setProperty('--z', zoom);
+  document.getElementById('zV').textContent = Math.round(zoom * 100) + '%';
+  if (keepCenter) scrollTo(cx * doc.scrollWidth - innerWidth / 2, cy * doc.scrollHeight - innerHeight / 2);
+  try { localStorage.setItem('zoom', zoom); } catch (e) {}
+}
+// 目前 100% 時的頁寬（像素）
+function baseWidth() { return Math.min(pagesEl.clientWidth - 32, 1000); }
+// 整頁：一整頁剛好放進畫面高度
+function fitPage() {
+  const pg = DATA[0], h = innerHeight - 32;
+  const top = scrollY + pagesEl.querySelector('.page').getBoundingClientRect().top;
+  const pages = [...pagesEl.querySelectorAll('.page')];
+  const cur = pages.findIndex(p => p.getBoundingClientRect().bottom > innerHeight / 2);
+  setZoom(h * pg.w / pg.h / baseWidth(), false);
+  const target = pages[Math.max(0, cur)];
+  scrollTo(0, scrollY + target.getBoundingClientRect().top - 16);
+}
+// 符合寬度：考卷寬度填滿視窗
+function fitWidth() { setZoom((pagesEl.clientWidth - 32) / baseWidth()); }
+document.getElementById('zIn').onclick = () => setZoom(ZOOMS.find(z => z > zoom + 0.001) || 3);
+document.getElementById('zOut').onclick = () => setZoom([...ZOOMS].reverse().find(z => z < zoom - 0.001) || 0.2);
+document.getElementById('zReset').onclick = () => setZoom(1);
+document.getElementById('zPage').onclick = fitPage;
+document.getElementById('zWidth').onclick = fitWidth;
+setZoom(zoom, false);
+
+// 一鍵全螢幕
+const fsBtn = document.getElementById('fs');
+if (!document.documentElement.requestFullscreen) fsBtn.style.display = 'none';
+fsBtn.onclick = e => {
+  e.stopPropagation();
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen().catch(() => {});
+};
+document.addEventListener('fullscreenchange', () => {
+  const on = !!document.fullscreenElement;
+  fsBtn.textContent = on ? '⤡' : '⛶';
+  fsBtn.title = on ? '離開全螢幕' : '全螢幕';
+});
+function clearActive() { activeEls.forEach(e => e.classList.remove('on')); activeEls = []; stopBtn.classList.remove('show'); }
+function speak(text, els) {
+  if (!synth) return;
+  synth.cancel(); clearActive();
+  activeEls = els; els.forEach(e => e.classList.add('on')); stopBtn.classList.add('show');
+  // 分句朗讀，避免長句被瀏覽器截斷
+  const parts = text.match(/[^。？！]+[。？！]?/g) || [text];
+  parts.forEach((t, i) => {
+    const u = new SpeechSynthesisUtterance(t);
+    u.lang = 'zh-TW'; u.rate = parseFloat(rateEl.value);
+    const v = voices[voiceEl.value]; if (v) u.voice = v;
+    if (i === parts.length - 1) { u.onend = () => { if (activeEls === els) clearActive(); }; }
+    synth.speak(u);
+  });
+}
+stopBtn.onclick = e => { e.stopPropagation(); synth && synth.cancel(); clearActive(); };
+</script>
+</body>
+</html>

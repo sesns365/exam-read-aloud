@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+# 不要把考卷或產出的報讀版放進 repo
+*.pdf
+*.docx
+*.doc
+*_報讀版.html
+work/

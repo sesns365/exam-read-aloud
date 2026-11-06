@@ -1,0 +1,83 @@
+---
+name: exam-read-aloud
+description: 把考卷（PDF、Word、圖片／掃描檔）自動做成「版面完全不變、可點按報讀」的 HTML 報讀版考卷。只要使用者丟入／附上考卷類檔案（.pdf、.docx/.doc、.jpg/.png 等；檔名或內容像考卷、試卷、題目卷、評量、學習單、期中考、期末考、小考、月考，含是非題、選擇題、填充題等），即使沒有說明要做什麼，也直接自動產出報讀版，不必先問。使用者說「報讀考卷」「報讀版」「點讀考卷」「唸題目給學生聽」「特殊考場報讀」時也使用。只有在使用者明確說「部署」「上傳到 GitHub Pages」「給我網址」時才部署到 GitHub Pages，否則絕不自動部署。
+---
+
+# 報讀考卷產生器
+
+把考卷轉成單一 HTML 檔：每頁用原始畫面當背景（版面完全不變），上面疊透明可點區塊，點了用瀏覽器語音（zh-TW）朗讀。單一檔案、可離線、可列印。
+
+下文的 `<SKILL_DIR>` 指這個 SKILL 所在的資料夾（載入 SKILL 時顯示的 base directory）。
+
+## 何時自動執行
+- 使用者丟入考卷類檔案（PDF／Word／圖片）→ **不用詢問，直接產出報讀版**。
+- 檔案明顯不是考卷（公文、說明書、照片）→ 先簡短確認再做。
+- 一份考卷拍成多張圖片 → 依頁序合成一個 HTML；多份不同考卷 → 各自產出。
+
+## 支援的輸入與處理方式
+| 輸入 | 處理 | 文字來源 |
+|---|---|---|
+| PDF（有文字層，例如 Word 匯出的） | 每頁轉圖當背景 | PDF 文字與座標（最準） |
+| Word（.docx .doc .rtf .odt） | 先用 Microsoft Word 轉成 PDF（版面不變；沒有 Word 時改用 LibreOffice） | 同上 |
+| 圖片（.jpg .png .bmp .tif .webp .gif）、掃描 PDF | 原圖當背景（自動依 EXIF 轉正，最長邊縮到 2400px） | Windows 內建 OCR（zh-Hant-TW）＋ **Claude 對照原圖校正** |
+
+## 產出的功能（使用者已確認的設計，不要更動）
+- **藍框（題號，例如「1. (　)」「(　)(1)」）**：整題一次唸完（題目＋全部選項）。
+- **橘框（題目文字）**：只唸題目。
+- **橘框（每個選項：①②③④、○＋全形數字、代號框 A–D）**：只唸該選項。
+- 閱讀題組的文章依段落分開點讀。
+- 右上角只有小圖示：**⛶ 全螢幕**、**⚙ 設定**（考卷大小 －／＋／還原／整頁顯示／符合寬度、語速、聲音、使用說明）。朗讀時才出現紅色 ■ 停止鈕。
+- 設定（聲音、大小）記在瀏覽器；列印時圖示自動隱藏，印出與原卷相同。
+
+## 步驟
+
+1. **準備**：需要 Python 3 與 `pymupdf`、`Pillow`（沒有就 `pip install pymupdf pillow`）。在 scratchpad 建一個工作資料夾 `<WORK>`（每份考卷一個新的）。
+
+2. **把輸入檔複製到英數路徑**（中文路徑在 PowerShell 傳給 Python 可能變亂碼）。用 Python 搜尋並複製，不要在指令裡直接寫中文檔名：
+   ```powershell
+   python -I -c "import glob,shutil,sys; f=sorted(glob.glob(sys.argv[1])); print(f); shutil.copy(f[0], sys.argv[2])" "<來源資料夾>/*.pdf" "<WORK>\in.pdf"
+   ```
+   多個檔案時，用檔名中的關鍵字（`\uXXXX` 寫法）篩選，或依序複製成 `in1.jpg`、`in2.jpg`…。
+
+3. **產生 HTML**：
+   ```powershell
+   $env:PYTHONIOENCODING='utf-8'
+   python -I "<SKILL_DIR>\scripts\build.py" "<WORK>\in.pdf" -o "<WORK>\out.html" --work "<WORK>" --title "<考卷名稱>（報讀版）" --dump "<WORK>\say.txt"
+   ```
+   多頁圖片：把多個檔案依頁序列在 `-o` 前面。
+
+4. **圖片／掃描檔要校正 OCR（一定要做）**：第一次執行會輸出 `<WORK>\ocr_lines.json`（每行一筆：`id`、`page`、`bbox`、`text`）和頁面圖 `<WORK>\page_N.png`。Windows OCR 常把加底線的專有名詞、①②③④ 認錯或漏掉，所以：
+   - 用 Read 看 `page_N.png`（必要時 zoom 局部），逐行把 `text` 改成原卷上的正確文字。只改 `text`，不要改 `id`、`bbox`。
+   - 題號寫成 `1. (   ) …`、小題寫成 `（ ）(１)…`、大題寫成 `一、…`。
+   - 圈號選項寫成 `①中國 ②日本 ③菲律賓 ④荷蘭。`；代號框寫成 `A 東邊 B 西邊 C 南邊 D 北邊`（字母前後留空格）。
+   - 閱讀文章新段落的開頭加兩個半形空白。
+   - 不需要唸的雜訊行（裝飾、亂碼）：`text` 設為 `""`。
+   - OCR 漏掉的整行：新增一筆 `{"id": "p1-new1", "page": 1, "bbox": [x0,y0,x1,y1], "text": "..."}`（`page_N.png` 的像素座標），放在閱讀順序正確的位置。
+   - 陣列順序就是閱讀順序（同一題的行要相鄰）；兩欄排版時先左欄再右欄。
+   - 校正完用**同樣的指令**再執行一次，就會用校正後的文字產生正式 HTML。
+
+5. **檢查報讀文字**：讀 `say.txt`，確認：
+   - 每題都是獨立區塊（是非、選擇、填代號、勾選、題組、閱讀文章段落）。
+   - 選擇題選項都有抓到（`選項1…4`），代號框有 `選項A…D`。
+   - 題號唸「第N題」、小題唸「第N小題」，「○」空格唸「圈圈」、「ˇ」唸「勾」。
+   PDF／Word 格式特殊時（例如選項用 (A)(B)(C)、題號用「（一）」），修改 `build.py` 的規則（`Q_RE`、`SUB_RE`、`CIRC`、`LETTERS`）後重跑。
+
+6. **用瀏覽器檢查**：在 `<WORK>` 用 `python -m http.server` 開本機伺服器，用內建瀏覽器開啟，暫時用 JS 把 `.blk`、`.opt` 加上框線截圖，確認可點區塊對準文字；攔截 `speechSynthesis.speak` 確認點擊唸出正確文字。檢查完關掉伺服器。圖片來源的位置稍有偏差時，修正 `ocr_lines.json` 的 `bbox` 後重跑。
+
+7. **輸出**：把 `out.html` 複製到使用者的工作資料夾，檔名＝原檔名（去副檔名）＋「_報讀版.html」。回報檔案連結、三種點法（藍框整題、橘框題目、橘框選項）與右上角圖示；提醒用 Chrome／Edge、考前先試聽破音字。**不要自動部署。**
+
+## 注意
+- 呼叫 Word 時只會關閉這次開啟的 Word 執行個體；使用者原本開著的 Word 文件不受影響。不要用 Stop-Process 關閉使用者的 Word。
+- OCR 語言套件不存在時，請使用者到 Windows 設定 →「時間與語言」→「語言」新增「中文（繁體，台灣）」。
+
+## 部署到 GitHub Pages（只有使用者明確要求時才做）
+
+觸發語：「部署」「上傳 GitHub Pages」「放到網路上」「給我網址」。沒說就絕對不部署、也不要主動推送任何東西到 GitHub。
+
+1. 確認 `git`、`gh` 已安裝且 `gh auth status` 已登入（沒有就用 `winget install Git.Git GitHub.cli` 安裝，再請使用者執行 `gh auth login --web` 登入）。
+2. 預設使用一個集中的 repo（例如 `read-aloud-exams`，公開，才能用免費 Pages）；第一次沒有就建立：`gh repo create read-aloud-exams --public --clone`。
+3. 每份考卷放一個英數子資料夾，檔名用 `index.html`（例如 `2026-g5-social-mid/index.html`），commit 並 push。**只上傳這個 HTML，不要上傳原始考卷檔**（HTML 已內含考卷畫面）。
+4. 第一次啟用 Pages：`gh api -X POST repos/{owner}/read-aloud-exams/pages -f "source[branch]=main" -f "source[path]=/"`。
+5. 網址為 `https://<帳號>.github.io/read-aloud-exams/<子資料夾>/`。Pages 需要 1–3 分鐘生效，用瀏覽器確認可開啟（不是 404）後再回報。
+6. 部署前提醒一次：公開網址任何人都能看到，**建議考試當天再部署，考完刪除該資料夾**。使用者要求刪除時，刪掉子資料夾後 commit、push。
+7. 出現 404 時依序檢查：repo 裡真的有 `index.html`（不是只有 README）、Settings → Pages 的來源是 `main` / `(root)`、repo 是 Public、Actions 的 pages build 已完成、網址大小寫正確。
