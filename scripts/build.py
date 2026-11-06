@@ -68,6 +68,80 @@ def strip_zhuyin(s):
     return re.sub(r'(?<=[一-鿿])˙', '', s)
 
 
+def border_segments(page):
+    """收集頁面上畫出來的框線（表格、方框），回傳 (水平線, 垂直線)。"""
+    hs, vs = [], []
+
+    def add(x0, y0, x1, y1):
+        x0, x1 = sorted((x0, x1)); y0, y1 = sorted((y0, y1))
+        if y1 - y0 <= 2.5 and x1 - x0 > 3:
+            hs.append(((y0 + y1) / 2, x0, x1))
+        elif x1 - x0 <= 2.5 and y1 - y0 > 3:
+            vs.append(((x0 + x1) / 2, y0, y1))
+    for dr in page.get_drawings():
+        for it in dr['items']:
+            if it[0] == 'l':
+                add(it[1].x, it[1].y, it[2].x, it[2].y)
+            elif it[0] == 're':
+                r = it[1]
+                if r.height <= 2.5 or r.width <= 2.5:   # 細長的填色矩形＝線條
+                    add(r.x0, r.y0, r.x1, r.y1)
+                elif dr.get('type') in ('s', 'fs') and dr.get('color') is not None:  # 有描邊的方框：四條邊（純填色的底色塊不算）
+                    add(r.x0, r.y0, r.x1, r.y0); add(r.x0, r.y1, r.x1, r.y1)
+                    add(r.x0, r.y0, r.x0, r.y1); add(r.x1, r.y0, r.x1, r.y1)
+    return hs, vs
+
+
+def _covered(segs, pos, a, b, tol=2.0):
+    """座標 pos 上的線段（可能由好幾段接成）是否完整覆蓋 a～b。"""
+    iv = sorted((s, e) for p, s, e in segs if abs(p - pos) <= tol)
+    cur = a + tol
+    for s, e in iv:
+        if s - tol <= cur:
+            cur = max(cur, e)
+        if cur >= b - tol:
+            return True
+    return cur >= b - tol
+
+
+def box_of(bb, segs, W, H, tol=1.5):
+    """找出字所在的方框：上下左右四條框線都要完整圍住（字下的底線、圖中的線條不算）。找不到回傳 None。"""
+    hs, vs = segs
+    cx, cy = (bb[0] + bb[2]) / 2, (bb[1] + bb[3]) / 2
+    lefts = sorted({round(x, 1) for x, a, b in vs if x <= cx and a - tol <= cy <= b + tol}, reverse=True)[:5]
+    rights = sorted({round(x, 1) for x, a, b in vs if x >= cx and a - tol <= cy <= b + tol})[:5]
+    tops = sorted({round(y, 1) for y, a, b in hs if y <= cy and a - tol <= cx <= b + tol}, reverse=True)[:5]
+    bots = sorted({round(y, 1) for y, a, b in hs if y >= cy and a - tol <= cx <= b + tol})[:5]
+    best = None
+    for l in lefts:
+        for r in rights:
+            if r - l > 0.85 * W:
+                continue
+            for t in tops:
+                for bt in bots:
+                    if bt - t > 0.5 * H:
+                        continue
+                    area = (r - l) * (bt - t)
+                    if best and area >= best[0]:
+                        continue
+                    if (_covered(hs, t, l, r) and _covered(hs, bt, l, r)
+                            and _covered(vs, l, t, bt) and _covered(vs, r, t, bt)):
+                        best = (area, (l, t, r, bt))
+    return best[1] if best else None
+
+
+def say_clean(s):
+    """一般文字整理成朗讀用（不處理題號）。"""
+    s = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', s)
+    s = re.sub(r'[（(]\s*[）)]', '括號', s)
+    s = strip_zhuyin(s)
+    s = cl(s).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
+    s = re.sub(r'_{2,}|＿{2,}', '空格', s)
+    s = re.sub(r'(\d)\s*[°∘˚]', r'\1度', s)
+    s = re.sub(r'[‧˙•·]+', '，', s).strip('，')
+    return s
+
+
 def union(bbs):
     return [min(b[0] for b in bbs), min(b[1] for b in bbs), max(b[2] for b in bbs), max(b[3] for b in bbs)]
 
@@ -115,7 +189,8 @@ for src in args.inputs:
             if n_text >= 20:
                 pix = p.get_pixmap(dpi=args.dpi, colorspace=pymupdf.csGRAY)
                 url, size = encode_img(pix)
-                pages_src.append({'kind': 'text', 'img': url, 'size': size, 'w': p.rect.width, 'h': p.rect.height, 'lines': lines})
+                pages_src.append({'kind': 'text', 'img': url, 'size': size, 'w': p.rect.width, 'h': p.rect.height, 'lines': lines,
+                                  'segs': border_segments(p)})
             else:  # 掃描頁：轉圖後 OCR
                 pix = p.get_pixmap(dpi=args.dpi)
                 n = len(pages_src) + 1
@@ -368,6 +443,38 @@ for pi, pg in enumerate(pages_src):
         for j in pending:
             seq[j][3] = owner
 
+        # 方框／表格格子：題目文字中落在框線內的字，每個框各自成為一個可點區塊
+        # （含題號的那個框仍算題目本身，例如連連看左框；佔題目七成以上的大框不拆）
+        box_rect = {}
+        if pg.get('segs'):
+            stem_idx = [i for i, x in enumerate(seq) if x[3] == 0 and i >= nprefix and not x[0].isspace()]
+            groups = {}
+            for i in stem_idx:
+                b = box_of(seq[i][1], pg['segs'], W, H)
+                if b:
+                    groups.setdefault(b, []).append(i)
+            pre_box = {box_of(seq[i][1], pg['segs'], W, H) for i in range(nprefix) if not seq[i][0].isspace()}
+            cands = [(b, idx) for b, idx in groups.items() if b not in pre_box and len(idx) < 0.7 * len(stem_idx)
+                     and (len(say_clean(''.join(seq[i][0] for i in idx))) >= 2
+                          or any(CJK(seq[i][0]) for i in idx))]   # 單一國字（如表頭「花」）也算；只有數字符號的圖上標記不算
+            if not (cands and len(stem_idx) - sum(len(idx) for _, idx in cands) >= 2):
+                cands = []
+            # 選項的字若跨到別的方框（例如表頭「③種子」下面一列的格子），其他方框也各自獨立
+            for o in sorted({x[3] for x in seq if 0 < x[3] < 1000}):
+                oidx = [i for i, x in enumerate(seq) if x[3] == o and not x[0].isspace()]
+                obox = {}
+                for i in oidx:
+                    obox.setdefault(box_of(seq[i][1], pg['segs'], W, H), []).append(i)
+                first = box_of(seq[oidx[0]][1], pg['segs'], W, H) if oidx else None
+                cands += [(b, idx) for b, idx in obox.items() if b is not None and b != first]
+                if first is not None:   # 選項在框內：框外的字（圖上的說明）不算這個選項
+                    for i in obox.get(None, []):
+                        seq[i][3] = 0
+            for n, (b, idx) in enumerate(sorted(cands, key=lambda c: (c[0][1], c[0][0]))):
+                for i in idx:
+                    seq[i][3] = 1000 + n
+                box_rect[1000 + n] = b
+
         owners = sorted(set(x[3] for x in seq))
         parts = {}
         for o in owners:
@@ -393,13 +500,33 @@ for pi, pg in enumerate(pages_src):
         st = re.sub(r'_{2,}|＿{2,}', '空格', st)
         st = re.sub(r'(\d)\s*[°∘˚]', r'\1度', st)
         st = re.sub(r'[‧˙•·]{2,}', '，', st)
-        st = st.replace('，。', '，').replace('。。', '。').lstrip('。')
+        st = st.replace('，。', '，').replace('。。', '。').lstrip('。').rstrip('，')
         if st and st[-1] not in '。？！：」?!:':
             st += '。'
 
         opts = []
+        cells = {}
+        for o in owners:
+            if o < 1000:
+                continue
+            ct = say_clean(parts[o]['text']).rstrip('。')
+            if ct:
+                cells[o] = ct
         for o in owners:
             if o == 0:
+                continue
+            if o >= 1000:  # 方框／表格格子
+                if o not in cells:
+                    continue
+                ct = cells[o]
+                b = box_rect[o]
+                # 只有數值的格子（例如「3本」）：前面加上同一列第一格，唸成「A 磁鐵：不加鐵片，3本」
+                if len(ct) <= 4 and re.search(r'[0-9０-９?？]', ct):
+                    row = [p for p, rb in box_rect.items() if p in cells and p != o and rb[0] < b[0]
+                           and min(rb[3], b[3]) - max(rb[1], b[1]) > 0.5 * (b[3] - b[1])]
+                    if row:
+                        ct = cells[min(row, key=lambda p: box_rect[p][0])] + '，' + ct
+                opts.append({'n': '格', 'cell': True, 'say': ct + '。', 'rects': parts[o]['rects']})
                 continue
             ot = strip_zhuyin(cl(parts[o]['text'])).replace('○', '')
             if o >= 10:
@@ -409,7 +536,7 @@ for pi, pg in enumerate(pages_src):
             ot = re.sub(r'[‧˙•·]{2,}', '，', ot)
             ot = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', ot)
             ot = re.sub(BR, '括號', ot)
-            ot = ot.rstrip('。')
+            ot = ot.rstrip('。，')
             opts.append({'n': lab, 'say': f'{lab}，{ot}。', 'rects': parts[o]['rects']})
 
         stem_seq = [x for x in seq if x[3] == 0]

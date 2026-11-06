@@ -80,7 +80,7 @@ DATA.forEach((pg, i) => {
     parts.forEach(o => {
       const els = o.rects.map(r => { const e = document.createElement('div'); e.className = 'opt'; place(e, r, pg, 1.5); page.appendChild(e); return e; });
       els.forEach(e => {
-        e.title = o.n === '題目' ? '只唸題目' : '只唸選項 ' + o.n;
+        e.title = o.n === '題目' ? '只唸題目' : o.cell ? '只唸這一格' : '只唸選項 ' + o.n;
         e.addEventListener('click', ev => { ev.stopPropagation(); speak(o.say, els); });
         e.addEventListener('mouseenter', () => els.forEach(x => x.style.background = 'rgba(255,140,0,.18)'));
         e.addEventListener('mouseleave', () => els.forEach(x => x.style.background = ''));
