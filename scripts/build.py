@@ -23,7 +23,7 @@ OCR 校正流程（圖片、掃描檔）：
   橘框（題目文字）       ＝ 只唸題目
   橘框（每個選項）       ＝ 只唸該選項（①②③④、○＋全形數字、代號框 A–D）
 """
-import pymupdf, sys, json, re, base64, argparse, os, subprocess, difflib, io
+import pymupdf, sys, json, re, base64, argparse, os, subprocess, difflib, io, unicodedata
 
 sys.stdout.reconfigure(encoding='utf-8', errors='replace')
 sys.stderr.reconfigure(encoding='utf-8', errors='replace')
@@ -44,14 +44,14 @@ IMG_EXT = ('.png', '.jpg', '.jpeg', '.bmp', '.tif', '.tiff', '.webp', '.gif')
 WORD_EXT = ('.docx', '.doc', '.rtf', '.odt')
 FW = {'１': 1, '２': 2, '３': 3, '４': 4, '５': 5}
 CIRC = {'①': 1, '②': 2, '③': 3, '④': 4, '⑤': 5}
-LETTERS = 'ABCDEFGHㄅㄆㄇㄈㄉＡＢＣＤＥＦＧＨ'   # 代號：英文字母、注音符號或全形字母（同一行要有兩個以上才算代號選項）
+LETTERS = 'ABCDEFGHㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏＡＢＣＤＥＦＧＨ'   # 代號：英文字母、注音符號或全形字母（同一行要有兩個以上才算代號選項）
 CIRC_ALL = '①②③④⑤⑥⑦⑧⑨⑩'
 CJK = lambda ch: '一' <= ch <= '鿿'
 SECTION_RE = re.compile(r'^[一二三四五六七八九十]+[、．.]')
 BR = r'[（(]\s*[）)]'   # 作答括號 (   )
-Q_RE = re.compile(rf'^(\d+\s*[.．、]|{BR}\s*\d+\s*[.．、])')
+Q_RE = re.compile(rf'^(\d+\s*[.．、]|{BR}\s*\d+\s*[.．、]|[0-9０-９]+\s*{BR})')
 SUB_RE = re.compile(rf'^({BR}\s*([（(][１２３４５６７８９1-9][）)]|[{CIRC_ALL}])|[（(][１２３４５６７８９1-9][）)])')
-PREFIX_RE = re.compile(rf'^\s*(\d+\s*[.．、]\s*{BR}|{BR}\s*\d+\s*[.．、]|\d+\s*[.．、]|{BR}\s*[（(].[）)]|{BR}\s*[{CIRC_ALL}]|[（(][１２３４５６７８９1-9][）)])\s*')
+PREFIX_RE = re.compile(rf'^\s*(\d+\s*[.．、]\s*{BR}|[0-9０-９]+\s*{BR}|{BR}\s*\d+\s*[.．、]|\d+\s*[.．、]|{BR}\s*[（(].[）)]|{BR}\s*[{CIRC_ALL}]|[（(][１２３４５６７８９1-9][）)])\s*')
 
 
 def cl(s):
@@ -66,6 +66,207 @@ def strip_zhuyin(s):
     Z = r'[ㄅ-ㄯㆠ-ㆿ]'
     s = re.sub(rf'(?<=[一-鿿])\s*({Z}{{2,}}[ˊˇˋ˙]?|{Z}[ˊˇˋ˙])', '', s)
     return re.sub(r'(?<=[一-鿿])˙', '', s)
+
+
+WINGDINGS2_CIRC = {0xF06A + i: '①②③④⑤⑥⑦⑧⑨⑩'[i] for i in range(10)}   # Wingdings 2 的圈號
+
+
+def norm_char(ch, font):
+    """字型特殊字元轉成一般字：Wingdings 2 圈號、數學粗體／斜體字母、直書標點。回傳 '' 表示丟掉。"""
+    o = ord(ch)
+    if 0xE000 <= o <= 0xF8FF:   # 符號字型（Wingdings 等）的私用區字元
+        return WINGDINGS2_CIRC.get(o, '') if 'wingdings2' in font.lower().replace(' ', '').replace('-', '') else ''
+    if 0x1D400 <= o <= 0x1D7FF or 0xFE10 <= o <= 0xFE19 or 0xFE30 <= o <= 0xFE4F:
+        return unicodedata.normalize('NFKC', ch)
+    if o in (0x0305, 0x0304, 0x20D7):   # 線段上方的橫線、向量箭頭（組合字元）
+        return ''
+    return ch
+
+
+def pdf_page_lines(p):
+    """讀出 PDF 頁面的文字行（每字含位置與字級）。看不見的白色字（隱藏答案）會被丟掉。
+    直書頁會重組成直行；分數（上下兩小行）與上標會合回所在的那一行。"""
+    lines = []
+    for b in p.get_text('rawdict')['blocks']:
+        if b['type'] != 0:
+            continue
+        for l in b['lines']:
+            chars = []
+            for s in l['spans']:
+                if s.get('color', 0) == 0xFFFFFF or s.get('alpha', 255) == 0:
+                    continue   # 白色／透明的字：看不見，多半是藏起來的答案
+                for c in s['chars']:
+                    ch = norm_char(c['c'], s['font'])
+                    if ch:
+                        chars.append((ch, c['bbox'], s['size']))
+            if chars:
+                lines.append({'chars': chars, 'bbox': union([b for _, b, _ in chars])})
+    if is_vertical(lines):
+        W = p.rect.width
+        hs, _ = border_segments(p)
+        cuts = [(y, x0, x1) for y, x0, x1 in hs if x1 - x0 > 0.6 * W]
+        lines = vertical_lines(lines, cuts)
+        for l in lines:
+            l['vertical'] = True
+    else:
+        lines = merge_stacked(lines)
+    for l in lines:
+        l['chars'] = [(c, b) for c, b, *_ in l['chars']]
+        l['text'] = ''.join(c for c, _ in l['chars'])
+    return lines
+
+
+def is_vertical(lines):
+    """直書判斷：相鄰兩字「往下排」比「往右排」多很多。"""
+    seq = [c for l in lines for c in l['chars'] if c[0].strip()]
+    down = right = 0
+    for (a, ba, _), (b, bb, _) in zip(seq, seq[1:]):
+        h = max(ba[3] - ba[1], 1)
+        dx, dy = bb[0] - ba[0], bb[1] - ba[1]
+        if abs(dx) < 0.5 * h and 0.5 * h < dy < 1.6 * h:
+            down += 1
+        elif abs(dy) < 0.5 * h and 0 < dx < 1.6 * h:
+            right += 1
+    return down > 200 and down > 2 * right
+
+
+def vertical_lines(lines, cuts=()):
+    """直書：依字的位置重組閱讀順序。先用頁面上的長橫線（例如上下兩半的分隔線）切成上下幾區，
+    每區由右而左一直行一直行讀，同一直行由上而下；直行中的空隙（例如兩個選項之間）切成不同行。
+    直行內橫排的數字（如 114）會接在一起。新段落（行首比前一行低一格半以上）在行首補兩個空白。"""
+    seq = [c for l in lines for c in l['chars'] if c[0].strip()]
+    if not seq:
+        return []
+    xc = lambda c: (c[1][0] + c[1][2]) / 2
+    band = lambda c: sum(1 for y, x0, x1 in cuts if (c[1][1] + c[1][3]) / 2 > y and x0 <= xc(c) <= x1)
+    out = []
+    for bi in sorted({band(c) for c in seq}):
+        cs = sorted([c for c in seq if band(c) == bi], key=xc, reverse=True)
+        cols = []
+        for c in cs:   # 依 x 分成直行
+            h = max(c[2], 1)
+            if cols and abs(xc(c) - cols[-1]['x']) < 0.6 * h:
+                cols[-1]['cs'].append(c)
+                cols[-1]['x'] = sum(xc(x) for x in cols[-1]['cs']) / len(cols[-1]['cs'])
+            else:
+                cols.append({'x': xc(c), 'cs': [c]})
+        segs = []
+        for col in cols:
+            col['cs'].sort(key=lambda c: (round(c[1][1] / 3), c[1][0]))
+            cur = []
+            for c in col['cs']:
+                h = max(c[2], 1)
+                gap = c[1][1] - max(x[1][3] for x in cur) if cur else 0
+                if cur and gap > 0.9 * h and not (cur[-1][0] in '(（︵' and gap < 5 * h):
+                    segs.append(cur); cur = []
+                cur.append(c)
+            if cur:
+                segs.append(cur)
+        prev = None
+        for sg in segs:
+            bb = union([b for _, b, _ in sg])
+            h = max(sg[0][2], 1)
+            chars = list(sg)
+            if prev and abs(prev[1] - bb[1]) < 6 * h and bb[1] - prev[1] > 1.5 * h and 0 < prev[0] - bb[2] < 3 * h:
+                sp = [bb[0], bb[1] - 2 * h, bb[2], bb[1]]
+                chars = [(' ', sp, h), (' ', sp, h)] + chars
+            out.append({'chars': chars, 'bbox': bb})
+            prev = (bb[0], bb[1], bb[2])
+    return out
+
+
+MATHY = re.compile(r'[0-9A-Za-z()+\-−.,]')
+
+
+def merge_stacked(lines):
+    """數學式：Word 方程式的分數（分子、分母是上下兩個小字）和上標（cm³ 的 3）在 PDF 裡被拆成別行。
+    做法：先把同一列被拆開的片段接回一行，再把小字放回所在的那一列，依左右順序排好：
+    分數變成「分子⁄分母」，帶分數在整數和分數之間加 ⁣，上標 2、3 變成 ²、³。
+    整頁都沒有這種小字時，完全不動。"""
+    allc = [c for l in lines for c in l['chars'] if c[0].strip()]
+    if not allc:
+        return lines
+    body = sorted(c[2] for c in allc)[len(allc) // 2]
+    is_small = lambda c: c[2] <= 0.85 * body and MATHY.match(c[0]) is not None
+    big = lambda l: [c for c in l['chars'] if c[0].strip() and c[2] > 0.85 * body]
+    if not any(is_small(c) for c in allc):
+        return lines
+    # 1. 同一列的片段接起來（只接 PDF 順序上相鄰、上下重疊、左右緊接的片段）
+    rows = []   # 每列：{'idx', 'lines', 'y0', 'y1', 'x0', 'x1', 'extra'}
+    loose = []  # 只有小字的行
+    for i, l in enumerate(lines):
+        b = big(l)
+        if not b:
+            if any(is_small(c) for c in l['chars']):
+                loose.append((i, l))
+            continue
+        y0, y1 = min(c[1][1] for c in b), max(c[1][3] for c in b)
+        x0, x1 = l['bbox'][0], l['bbox'][2]
+        if rows:
+            r = rows[-1]
+            ov = min(r['y1'], y1) - max(r['y0'], y0)
+            if ov > 0.5 * min(r['y1'] - r['y0'], y1 - y0) and -body < x0 - r['x1'] < 1.2 * body:
+                r['lines'].append(l); r['x1'] = max(r['x1'], x1)
+                r['y0'], r['y1'] = min(r['y0'], y0), max(r['y1'], y1)
+                continue
+        rows.append({'idx': i, 'lines': [l], 'y0': y0, 'y1': y1, 'x0': x0, 'x1': x1, 'extra': []})
+    # 2. 只有小字的行：每個字放回最近、上下範圍涵蓋它的那一列
+    left = []
+    for i, l in loose:
+        rest = []
+        for c in l['chars']:
+            cx, cy = (c[1][0] + c[1][2]) / 2, (c[1][1] + c[1][3]) / 2
+            best = None
+            for r in rows:
+                hh = r['y1'] - r['y0']
+                if r['y0'] - 0.75 * hh <= cy <= r['y1'] + 0.75 * hh and r['x0'] - body <= cx <= r['x1'] + 2 * body:
+                    d = abs(cy - (r['y0'] + r['y1']) / 2)
+                    if best is None or d < best[0]:
+                        best = (d, r)
+            (best[1]['extra'].append(c) if best and c[0].strip() else rest.append(c))
+        if any(c[0].strip() for c in rest):
+            left.append((i, {'chars': rest, 'bbox': union([c[1] for c in rest])}))
+    # 3. 每列重新排字
+    out = []
+    for r in rows:
+        items = [c for l in r['lines'] for c in l['chars']] + r['extra']
+        if not any(is_small(c) for c in items):
+            chars = items   # 這列沒有分數或上標：保持原本順序
+        else:
+            mid = (r['y0'] + r['y1']) / 2
+            normal = [c for c in items if not is_small(c)]
+            smalls = sorted([c for c in items if is_small(c)], key=lambda c: c[1][0])
+            groups = []
+            for c in smalls:   # 左右相連或上下疊在一起的小字算同一組
+                if groups and c[1][0] <= max(x[1][2] for x in groups[-1]) + 0.25 * body:
+                    groups[-1].append(c)
+                else:
+                    groups.append([c])
+            tokens = [(c[1][0], [c]) for c in normal]
+            for g in groups:
+                up = sorted([c for c in g if (c[1][1] + c[1][3]) / 2 < mid - 0.1 * body], key=lambda c: c[1][0])
+                dn = sorted([c for c in g if c not in up], key=lambda c: c[1][0])
+                x0 = min(c[1][0] for c in g)
+                if up and dn:      # 分數
+                    bar = [min(up[0][1][0], dn[0][1][0]), up[-1][1][3], max(up[-1][1][2], dn[-1][1][2]), dn[0][1][1]]
+                    tokens.append((x0, up + [('⁄', bar, up[0][2])] + dn))
+                elif up:           # 上標（次方）
+                    sup = {'2': '²', '3': '³'}
+                    tokens.append((x0, [(sup.get(c[0], c[0]), c[1], c[2]) for c in up]))
+                else:
+                    tokens.append((x0, dn))
+            tokens.sort(key=lambda t: t[0])
+            chars = []
+            for x0, cs in tokens:
+                if '⁄' in [c[0] for c in cs]:
+                    prev = next((c for c in reversed(chars) if c[0].strip()), None)
+                    if prev and prev[0].isdigit() and x0 - prev[1][2] < 0.6 * body:
+                        chars.append(('⁣', [x0, cs[0][1][1], x0, cs[0][1][3]], body))   # 帶分數：整數「又」分數
+                chars.extend(cs)
+        out.append((r['idx'], {'chars': chars, 'bbox': union([c[1] for c in chars])}))
+    out += left
+    out.sort(key=lambda t: t[0])
+    return [l for _, l in out]
 
 
 def border_segments(page):
@@ -130,12 +331,46 @@ def box_of(bb, segs, W, H, tol=1.5):
     return best[1] if best else None
 
 
+def math_say(s):
+    """數學式唸法：分數、帶分數、次方、運算符號、比較符號、百分率、餘數等。"""
+    OPD = r'[0-9A-Za-z)）\]⁄²³]'      # 運算元結尾
+    OPS = r'[0-9A-Za-z(（\[⁣]'        # 運算元開頭
+    s = re.sub(rf'(?<={OPD})\s*[×✕]\s*(?={OPS})', '乘', s)
+    s = re.sub(rf'(?<={OPD})\s*÷\s*(?={OPS})', '除以', s)
+    s = re.sub(rf'(?<={OPD})\s*[+＋]\s*(?={OPS})', '加', s)
+    s = re.sub(rf'(?<={OPD})\s*[−－]\s*(?={OPS})', '減', s)
+    s = re.sub(r'\s*[≦≤]\s*', '小於等於', s)
+    s = re.sub(r'\s*[≧≥]\s*', '大於等於', s)
+    s = re.sub(r'\s*≠\s*', '不等於', s)
+    s = re.sub(r'\s*[≒≈]\s*', '約等於', s)
+    s = re.sub(r'\s*≅\s*', '全等於', s)
+    s = re.sub(r'\s*[=＝]\s*', '等於', s)
+    s = re.sub(r'[＜<]([^＜＞<>0-9]{2,})[＞>]', r'\1', s)            # ＜恭喜你作答完畢＞：括住文字的是裝飾括號
+    s = re.sub(r'\s*[<＜]\s*', '小於', s)
+    s = re.sub(r'\s*[>＞]\s*', '大於', s)
+    s = re.sub(r'(?<=\d)\s*[…⋯]+\s*(?=\d)', '餘', s)              # 190÷37=5…5
+    # 分數與帶分數
+    s = re.sub(r'(\d+)⁣\s*([0-9.]+)⁄([0-9.]+)', r'\1又\3分之\2', s)
+    s = re.sub(r'([0-9A-Za-z.]+)⁄([0-9A-Za-z.]+)', r'\2分之\1', s)
+    s = s.replace('⁣', '').replace('⁄', '分之')
+    s = re.sub(r'(?<![\d/])(\d+)又(\d+)\s*/\s*(\d+)(?![\d/])', r'\1又\3分之\2', s)
+    s = re.sub(r'(?<![\d/.])(\d+)\s*/\s*(\d+)(?![\d/])', r'\2分之\1', s)
+    # 次方與面積、體積單位
+    for u, zh in (('km', '公里'), ('cm', '公分'), ('mm', '公釐'), ('m', '公尺')):
+        s = re.sub(rf'(?<![A-Za-z]){u}\s*²', '平方' + zh, s)
+        s = re.sub(rf'(?<![A-Za-z]){u}\s*³', '立方' + zh, s)
+    s = s.replace('²', '的平方').replace('³', '的立方')
+    s = re.sub(r'(\d+(?:\.\d+)?)\s*[%％]', r'百分之\1', s)
+    s = s.replace('π', '圓周率').replace('√', '根號').replace('∠', '角').replace('△', '三角形').replace('□', '方格')
+    return s
+
+
 def say_clean(s):
     """一般文字整理成朗讀用（不處理題號）。"""
     s = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', s)
     s = re.sub(r'[（(]\s*[）)]', '括號', s)
     s = strip_zhuyin(s)
-    s = cl(s).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
+    s = math_say(cl(s)).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
     s = re.sub(r'_{2,}|＿{2,}', '空格', s)
     s = re.sub(r'(\d)\s*[°∘˚]', r'\1度', s)
     s = re.sub(r'[‧˙•·]+', '，', s).strip('，')
@@ -178,19 +413,13 @@ for src in args.inputs:
     if ext == '.pdf':
         doc = pymupdf.open(src)
         for p in doc:
-            lines = []
-            for b in p.get_text('rawdict')['blocks']:
-                if b['type'] != 0:
-                    continue
-                for l in b['lines']:
-                    chars = [(c['c'], c['bbox']) for s in l['spans'] for c in s['chars']]
-                    lines.append({'text': ''.join(c for c, _ in chars), 'chars': chars, 'bbox': l['bbox']})
+            lines = pdf_page_lines(p)
             n_text = sum(len(cl(l['text'])) for l in lines)
             if n_text >= 20:
                 pix = p.get_pixmap(dpi=args.dpi, colorspace=pymupdf.csGRAY)
                 url, size = encode_img(pix)
                 pages_src.append({'kind': 'text', 'img': url, 'size': size, 'w': p.rect.width, 'h': p.rect.height, 'lines': lines,
-                                  'segs': border_segments(p)})
+                                  'segs': border_segments(p), 'vertical': any(l.get('vertical') for l in lines)})
             else:  # 掃描頁：轉圖後 OCR
                 pix = p.get_pixmap(dpi=args.dpi)
                 n = len(pages_src) + 1
@@ -378,11 +607,11 @@ for pi, pg in enumerate(pages_src):
             kind = 'section'; seen_section = True
         elif not seen_section and pi == 0:
             kind = 'title' if (cur is None or cur['kind'] != 'title') else None
-        elif Q_RE.match(s):
+        elif Q_RE.match(s) or (pg.get('vertical') and (re.match(r'^[０-９]{1,2}(?=[一-鿿「（(])', s) or re.match(rf'^{BR}\s*[一-鿿「]', s))):
             kind = 'q'
         elif SUB_RE.match(s):
             kind = 'sub'
-        elif (t.startswith('  ') or t.startswith('　')) and not s.startswith(('○', '①', '②', '③', '④')) and cur and cur['kind'] in ('q', 'para', 'section'):
+        elif (t.startswith('  ') or t.startswith('　')) and not s.startswith(('○', '①', '②', '③', '④')) and cur and cur['kind'] in (('para', 'section') if pg.get('vertical') else ('q', 'para', 'section')):
             kind = 'para'  # 閱讀題文章段落（行首縮排）
         elif s.startswith(('＊', '*', '※')):
             kind = 'note'
@@ -402,18 +631,23 @@ for pi, pg in enumerate(pages_src):
         nprefix = len(pm.group(0)) if pm else 0
         # 代號選項（A／B 或 ㄅ／ㄆ）：字母在行首或空白後、後面接中文，且同一行至少兩個
         code_at = set()
+        line_start_codes = []
         for li in range(len(bl['lines'])):
             idx = [i for i, x in enumerate(seq) if x[2] == li]
             cand = []
             for n, i in enumerate(idx):
                 c = seq[i][0]
                 # 注音代號不會出現在一般文字中，前面不必是空白
-                if c in LETTERS and (n == 0 or seq[idx[n-1]][0].isspace() or c in 'ㄅㄆㄇㄈㄉＡＢＣＤＥＦＧＨ'):
+                if c in LETTERS and (n == 0 or seq[idx[n-1]][0].isspace() or c in 'ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏＡＢＣＤＥＦＧＨ'):
                     nxt = next((seq[j][0] for j in idx[n+1:] if not seq[j][0].isspace() and seq[j][0] not in '.．、'), '')
                     if CJK(nxt):
                         cand.append(i)
             if len({seq[i][0] for i in cand}) >= 2:
                 code_at.update(cand)
+            elif cand and cand[0] == idx[0]:
+                line_start_codes.append(cand[0])
+        if pg.get('vertical') and len({seq[i][0] for i in line_start_codes}) >= 2:   # 每行開頭一個代號（直書成語選填）
+            code_at.update(line_start_codes)
         owner, pending = 0, []
         for i, item in enumerate(seq):
             c = item[0]
@@ -430,7 +664,7 @@ for pi, pg in enumerate(pages_src):
                 new = FW[c]
             elif pending and c in '12345':   # ○1 ○2（○加半形數字）
                 new = int(c)
-            elif pending and c in 'ㄅㄆㄇㄈㄉ':   # ○ㄅ ○ㄆ（圈注音代號）
+            elif pending and c in 'ㄅㄆㄇㄈㄉㄊㄋㄌㄍㄎㄏ':   # ○ㄅ ○ㄆ（圈注音代號）
                 new = 10 + LETTERS.index(c)
             elif i in code_at:
                 new = 10 + LETTERS.index(c)
@@ -457,6 +691,11 @@ for pi, pg in enumerate(pages_src):
             cands = [(b, idx) for b, idx in groups.items() if b not in pre_box and len(idx) < 0.7 * len(stem_idx)
                      and (len(say_clean(''.join(seq[i][0] for i in idx))) >= 2
                           or any(CJK(seq[i][0]) for i in idx))]   # 單一國字（如表頭「花」）也算；只有數字符號的圖上標記不算
+            def inline(idx):   # 方框前後同一行都有框外的字 → 是夾在句子中的格子（填空），不拆
+                li = seq[idx[0]][2]
+                outside = [i for i in stem_idx if seq[i][2] == li and box_of(seq[i][1], pg['segs'], W, H) is None]
+                return any(i < idx[0] for i in outside) and any(i > idx[-1] for i in outside)
+            cands = [(b, idx) for b, idx in cands if not inline(idx)]
             if not (cands and len(stem_idx) - sum(len(idx) for _, idx in cands) >= 2):
                 cands = []
             # 選項的字若跨到別的方框（例如表頭「③種子」下面一列的格子），其他方框也各自獨立
@@ -490,13 +729,17 @@ for pi, pg in enumerate(pages_src):
         st = re.sub(rf'^(\d+)\s*[.．、]\s*{BR}', r'第\1題，', st)
         st = re.sub(rf'^{BR}\s*(\d+)\s*[.．、]', r'第\1題，', st)
         st = re.sub(r'^(\d+)\s*[.．、]', r'第\1題，', st)
+        st = re.sub(rf'^([0-9０-９]+)\s*{BR}', lambda m: f'第{int(m.group(1))}題，', st)
         st = re.sub(rf'^{BR}\s*[（(](.)[）)]', lambda m: f'第{digit(m.group(1))}小題，', st)
         st = re.sub(rf'^{BR}\s*([{CIRC_ALL}])', lambda m: f'第{CIRC_ALL.index(m.group(1)) + 1}小題，', st)
         st = re.sub(r'^[（(]([１２３４５６７８９1-9])[）)]', lambda m: f'第{digit(m.group(1))}小題，', st)
+        if pg.get('vertical'):
+            st = re.sub(rf'^{BR}\s*', '', st)   # 直書：題號是圖形、只剩作答括號時，括號不唸
+            st = re.sub(r'^([０-９]{1,2})(?=[一-鿿「（(])', lambda m: f'第{int(m.group(1))}題，', st)   # 直書：「２原本…」
         st = re.sub(r'[（(]\s*[_＿]+\s*[）)]', '空格', st)
         st = re.sub(BR, '括號', st)
         st = strip_zhuyin(st)
-        st = cl(st).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
+        st = math_say(cl(st)).replace('○', '圈圈').replace('ˇ', '勾').replace('✓', '勾').replace('×', '叉').replace('＊', '').replace('※', '')
         st = re.sub(r'_{2,}|＿{2,}', '空格', st)
         st = re.sub(r'(\d)\s*[°∘˚]', r'\1度', st)
         st = re.sub(r'[‧˙•·]{2,}', '，', st)
@@ -528,7 +771,7 @@ for pi, pg in enumerate(pages_src):
                         ct = cells[min(row, key=lambda p: box_rect[p][0])] + '，' + ct
                 opts.append({'n': '格', 'cell': True, 'say': ct + '。', 'rects': parts[o]['rects']})
                 continue
-            ot = strip_zhuyin(cl(parts[o]['text'])).replace('○', '')
+            ot = math_say(strip_zhuyin(cl(parts[o]['text']))).replace('○', '')
             if o >= 10:
                 lab = LETTERS[o - 10]; ot = ot[1:].lstrip('.．、:：')
             else:
