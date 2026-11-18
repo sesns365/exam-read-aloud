@@ -62,11 +62,20 @@ git clone https://github.com/sesns365/exam-read-aloud.git "%USERPROFILE%\.claude
 1. 在 Claude Code 對話框丟入考卷檔案（PDF／Word／圖片都可以，一份考卷拍成多張圖也可以一起丟）。
 2. 不用多打字，Claude 會自動產出「原檔名_報讀版.html」。若沒有自動開始，補一句「做報讀版」即可。
 3. 圖片或掃描檔會多一個步驟：Claude 會對照原圖校正辨識文字，確保唸出來的內容正確。
+4. 做完後 Claude 會問你兩件事：
+   - **一次丟多份考卷時：要不要做首頁？** 首頁列出所有考卷名稱，學生點名稱就能開啟，旁邊的 🔊 可以聽名稱。
+   - **要不要部署到 GitHub Pages，直接給你網址？** 你回答「要」才會上傳。
+
+### 首頁（多份考卷）
+
+一次丟入多份考卷（例如期末考的國語、數學、社會、自然），Claude 會問要不要做一個首頁。首頁要和報讀版 HTML 放在同一個資料夾；部署時會一起放上網，學生只要記一個網址。
 
 ### 部署成網址（選用）
 
-想讓學生用網址開啟時，對 Claude 說「**部署到 GitHub Pages**」。**沒有明確要求就不會上傳任何東西。**
-部署時只上傳報讀版 HTML，不會上傳原始考卷檔。
+想讓學生用網址開啟時，在 Claude 問你時回答「要」，或直接說「**部署到 GitHub Pages**」。**沒有你同意就不會上傳任何東西。**
+部署時只上傳報讀版 HTML（和首頁），不會上傳原始考卷檔。
+
+還沒連接 GitHub 也沒關係，Claude 會一步一步帶你：註冊 GitHub 帳號、安裝 Git 與 GitHub CLI、在瀏覽器登入授權。不想安裝工具的話，Claude 會幫你整理好要上傳的資料夾，教你在 GitHub 網頁上用拖拉的方式上傳並開啟 Pages。
 
 > ⚠️ 公開網址任何人都看得到。建議考試當天再部署，考完刪除。
 
@@ -101,6 +110,7 @@ exam-read-aloud/
 ├── SKILL.md              # 給 Claude 的工作流程說明
 ├── scripts/
 │   ├── build.py          # 主程式：PDF／Word／圖片 → 報讀版 HTML
+│   ├── make_index.py     # 多份考卷的首頁產生器
 │   ├── word2pdf.ps1      # Word 轉 PDF（Microsoft Word／LibreOffice）
 │   └── ocr.ps1           # Windows 內建 OCR
 └── assets/

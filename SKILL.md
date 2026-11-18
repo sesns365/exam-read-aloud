@@ -1,6 +1,6 @@
 ---
 name: exam-read-aloud
-description: 把考卷（PDF、Word、圖片／掃描檔）自動做成「版面完全不變、可點按報讀」的 HTML 報讀版考卷。只要使用者丟入／附上考卷類檔案（.pdf、.docx/.doc、.jpg/.png 等；檔名或內容像考卷、試卷、題目卷、評量、學習單、期中考、期末考、小考、月考，含是非題、選擇題、填充題等），即使沒有說明要做什麼，也直接自動產出報讀版，不必先問。使用者說「報讀考卷」「報讀版」「點讀考卷」「唸題目給學生聽」「特殊考場報讀」時也使用。只有在使用者明確說「部署」「上傳到 GitHub Pages」「給我網址」時才部署到 GitHub Pages，否則絕不自動部署。
+description: 把考卷（PDF、Word、圖片／掃描檔）自動做成「版面完全不變、可點按報讀」的 HTML 報讀版考卷。只要使用者丟入／附上考卷類檔案（.pdf、.docx/.doc、.jpg/.png 等；檔名或內容像考卷、試卷、題目卷、評量、學習單、期中考、期末考、小考、月考，含是非題、選擇題、填充題等），即使沒有說明要做什麼，也直接自動產出報讀版，不必先問。使用者說「報讀考卷」「報讀版」「點讀考卷」「唸題目給學生聽」「特殊考場報讀」時也使用。產出後會詢問：一次多份考卷時是否做一個可點選的首頁、是否部署到 GitHub Pages（要使用者回答「要」才部署；還沒連接 GitHub 時會教老師怎麼設定）。使用者說「部署」「上傳到 GitHub Pages」「給我網址」「做首頁」時也使用。
 ---
 
 # 報讀考卷產生器
@@ -13,6 +13,8 @@ description: 把考卷（PDF、Word、圖片／掃描檔）自動做成「版面
 - 使用者丟入考卷類檔案（PDF／Word／圖片）→ **不用詢問，直接產出報讀版**。
 - 檔案明顯不是考卷（公文、說明書、照片）→ 先簡短確認再做。
 - 一份考卷拍成多張圖片 → 依頁序合成一個 HTML；多份不同考卷 → 各自產出。
+- 一次丟入多個檔案時，先判斷是「同一份考卷的多頁」還是「多份不同考卷」（看檔名、科目、題號是否接續）；判斷不出來就先簡短問一句。
+- 報讀版做完後，一定要問老師下一步（見步驟 8），不要自己決定做首頁或部署。
 
 ## 支援的輸入與處理方式
 | 輸入 | 處理 | 文字來源 |
@@ -74,20 +76,58 @@ description: 把考卷（PDF、Word、圖片／掃描檔）自動做成「版面
 
 6. **用瀏覽器檢查**：在 `<WORK>` 用 `python -m http.server` 開本機伺服器，用內建瀏覽器開啟，暫時用 JS 把 `.blk`、`.opt` 加上框線截圖，確認可點區塊對準文字；攔截 `speechSynthesis.speak` 確認點擊唸出正確文字。檢查完關掉伺服器。圖片來源的位置稍有偏差時，修正 `ocr_lines.json` 的 `bbox` 後重跑。
 
-7. **輸出**：把 `out.html` 複製到使用者的工作資料夾，檔名＝原檔名（去副檔名）＋「_報讀版.html」。回報檔案連結、三種點法（藍框整題、橘框題目、橘框選項）與右上角圖示；提醒用 Chrome／Edge、考前先試聽破音字。**不要自動部署。**
+7. **輸出**：把 `out.html` 複製到使用者的工作資料夾，檔名＝原檔名（去副檔名）＋「_報讀版.html」。回報檔案連結、三種點法（藍框整題、橘框題目、橘框選項）與右上角圖示；提醒用 Chrome／Edge、考前先試聽破音字。先不要部署，接著做步驟 8。
+
+8. **詢問老師下一步**（產出後一律要問，有 AskUserQuestion 工具就用它一次問完；沒有就用一則訊息列出選項）：
+   - **（只有這次產出 2 份以上考卷時才問）要不要做一個首頁？** 首頁會列出所有考卷名稱，學生點名稱就開啟，旁邊有 🔊 可以聽名稱。順便確認首頁標題（預設用共同的部分，例如「五年級期末考」）與考卷排列順序。
+   - **除了 HTML 檔案，要不要直接幫你部署到 GitHub Pages，給你一個網址？** 說明一句：部署後任何拿到網址的人都看得到，建議考試當天再部署、考完刪除。
+   老師回答「要」才做；沒回答或說不用，就停在本機 HTML 檔。
+
+9. **做首頁（老師要的話）**：
+   ```powershell
+   python -I "<SKILL_DIR>\scripts\make_index.py" "<考卷1_報讀版.html>" "<考卷2_報讀版.html>" ... -o "<輸出資料夾>\index.html" --title "<首頁標題>"
+   ```
+   - 考卷依指令順序排列；名稱自動讀取每個 HTML 的標題（去掉「（報讀版）」），要改名用 `--names 名稱1 名稱2 …`。
+   - 首頁用相對路徑連到考卷，所以首頁要和報讀版 HTML 放在**同一個資料夾**；檔名可用「首頁.html」或 `index.html`。
+   - 用瀏覽器開首頁，點每一張卡片確認都能開到正確的考卷。
 
 ## 注意
 - 呼叫 Word 時只會關閉這次開啟的 Word 執行個體；使用者原本開著的 Word 文件不受影響。不要用 Stop-Process 關閉使用者的 Word。
 - OCR 語言套件不存在時，請使用者到 Windows 設定 →「時間與語言」→「語言」新增「中文（繁體，台灣）」。
 
-## 部署到 GitHub Pages（只有使用者明確要求時才做）
+## 部署到 GitHub Pages（老師在步驟 8 回答「要」，或主動說「部署」「給我網址」時才做）
 
-觸發語：「部署」「上傳 GitHub Pages」「放到網路上」「給我網址」。沒說就絕對不部署、也不要主動推送任何東西到 GitHub。
+沒有老師同意就絕對不部署、也不要主動推送任何東西到 GitHub。
 
-1. 確認 `git`、`gh` 已安裝且 `gh auth status` 已登入（沒有就用 `winget install Git.Git GitHub.cli` 安裝，再請使用者執行 `gh auth login --web` 登入）。
-2. 預設使用一個集中的 repo（例如 `read-aloud-exams`，公開，才能用免費 Pages）；第一次沒有就建立：`gh repo create read-aloud-exams --public --clone`。
-3. 每份考卷放一個英數子資料夾，檔名用 `index.html`（例如 `2026-g5-social-mid/index.html`），commit 並 push。**只上傳這個 HTML，不要上傳原始考卷檔**（HTML 已內含考卷畫面）。
-4. 第一次啟用 Pages：`gh api -X POST repos/{owner}/read-aloud-exams/pages -f "source[branch]=main" -f "source[path]=/"`。
-5. 網址為 `https://<帳號>.github.io/read-aloud-exams/<子資料夾>/`。Pages 需要 1–3 分鐘生效，用瀏覽器確認可開啟（不是 404）後再回報。
-6. 部署前提醒一次：公開網址任何人都能看到，**建議考試當天再部署，考完刪除該資料夾**。使用者要求刪除時，刪掉子資料夾後 commit、push。
-7. 出現 404 時依序檢查：repo 裡真的有 `index.html`（不是只有 README）、Settings → Pages 的來源是 `main` / `(root)`、repo 是 Public、Actions 的 pages build 已完成、網址大小寫正確。
+### A. 先檢查有沒有連接 GitHub
+依序執行，任何一步失敗就到「B. 教老師連接 GitHub」：
+1. `git --version`、`gh --version`：確認已安裝。
+2. `gh auth status`：確認已登入 GitHub。
+
+### B. 教老師連接 GitHub（還沒連接時）
+不要只丟指令，用老師聽得懂的話一步一步帶，每一步等老師回覆完成再往下：
+1. **有沒有 GitHub 帳號？** 沒有的話請老師到 https://github.com/signup 用學校或個人 email 註冊（免費），記下帳號名稱，完成 email 驗證。
+2. **安裝工具**：說明「要在電腦裝兩個小工具 Git 和 GitHub CLI，才能幫你上傳」，徵得同意後由你執行 `winget install --id Git.Git -e` 與 `winget install --id GitHub.cli -e`（跳出 Windows 權限視窗請老師按「是」）。裝完後新的指令可能要重新開啟 Claude Code 才找得到；找不到時請老師關掉再開。
+3. **登入**：請老師在 Claude Code 的輸入框打 `! gh auth login --web --git-protocol https`（前面的驚嘆號代表由老師自己執行，這樣才能在瀏覽器登入）。告訴老師：畫面會出現一組 8 碼代碼 → 按 Enter 會開啟瀏覽器 → 登入 GitHub → 貼上代碼 → 按「Authorize」授權 → 回到這裡。
+4. 再跑一次 `gh auth status`，看到 Logged in 就完成，接著做 C。
+5. 老師不想裝工具時，改教**網頁手動上傳**：
+   - 先由你準備好要上傳的資料夾：在老師的工作資料夾建 `上傳GitHub\<英數資料夾>\`，照 C 的第 2、3 點放好 `index.html`（有首頁時連子資料夾和首頁一起做好）。
+   - 把下列步驟整理成編號清單給老師：到 https://github.com/new 建立 repo（名稱 `read-aloud-exams`、選 Public、勾選 Add a README file）→ 在 repo 頁面按「Add file → Upload files」→ 把 `上傳GitHub` 裡的英數資料夾整個拖進網頁 → 按「Commit changes」→ 到 Settings → Pages，Source 選「Deploy from a branch」、Branch 選 `main` 和 `/(root)` → Save → 等 1–3 分鐘，網址是 `https://<帳號>.github.io/read-aloud-exams/<英數資料夾>/`。
+
+### C. 部署
+1. 預設使用一個集中的 repo `read-aloud-exams`（公開，才能用免費 Pages）；第一次沒有就建立：`gh repo create read-aloud-exams --public --clone`；已有就 `gh repo clone` 或 `git pull` 取得最新版。
+2. **單份考卷**：放一個英數子資料夾，檔名用 `index.html`（例如 `2026-g5-social-final/index.html`）。
+3. **有首頁時**：建立一個英數的「一組」資料夾，每份考卷放在其下的子資料夾，再用 make_index.py 在該資料夾產生首頁，例如：
+   ```
+   2026-g5-final/index.html          ← 首頁（make_index.py 產生）
+   2026-g5-final/01-social/index.html
+   2026-g5-final/02-science/index.html
+   ```
+   ```powershell
+   python -I "<SKILL_DIR>\scripts\make_index.py" "<repo>\2026-g5-final\01-social\index.html" "<repo>\2026-g5-final\02-science\index.html" -o "<repo>\2026-g5-final\index.html" --title "<首頁標題>"
+   ```
+4. **只上傳報讀版 HTML 與首頁，不要上傳原始考卷檔**（HTML 已內含考卷畫面）。commit 並 push。
+5. 第一次啟用 Pages：`gh api -X POST repos/{owner}/read-aloud-exams/pages -f "source[branch]=main" -f "source[path]=/"`（已啟用會回 409，可忽略）。
+6. 網址為 `https://<帳號>.github.io/read-aloud-exams/<資料夾>/`；有首頁時給老師首頁網址，並列出每份考卷各自的網址。Pages 需要 1–3 分鐘生效，用瀏覽器確認可開啟（不是 404）後再回報。
+7. 提醒：公開網址任何人都能看到，**建議考試當天再部署，考完刪除該資料夾**。老師要求刪除時，刪掉資料夾後 commit、push。
+8. 出現 404 時依序檢查：repo 裡真的有 `index.html`（不是只有 README）、Settings → Pages 的來源是 `main` / `(root)`、repo 是 Public、Actions 的 pages build 已完成、網址大小寫正確。
