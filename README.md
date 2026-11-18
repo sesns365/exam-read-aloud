@@ -64,11 +64,14 @@ git clone https://github.com/sesns365/exam-read-aloud.git "%USERPROFILE%\.claude
 3. 圖片或掃描檔會多一個步驟：Claude 會對照原圖校正辨識文字，確保唸出來的內容正確。
 4. 做完後 Claude 會問你兩件事：
    - **一次丟多份考卷時：要不要做首頁？** 首頁列出所有考卷名稱，學生點名稱就能開啟，旁邊的 🔊 可以聽名稱。
+   - **點考卷要不要密碼？**（有做首頁或要部署時才問）
    - **要不要部署到 GitHub Pages，直接給你網址？** 你回答「要」才會上傳。
 
 ### 首頁（多份考卷）
 
 一次丟入多份考卷（例如期末考的國語、數學、社會、自然），Claude 會問要不要做一個首頁。首頁要和報讀版 HTML 放在同一個資料夾；部署時會一起放上網，學生只要記一個網址。
+
+需要的話可以幫考卷加**密碼**（全部或只鎖其中幾份）：學生點考卷會跳出輸入框，輸入老師給的密碼才會開啟，避免提早或自己打開考卷。這是方便的考場鎖，不是高強度保密；部署時 Claude 會把考卷資料夾名稱加上亂碼，讓人猜不到網址。
 
 ### 部署成網址（選用）
 
@@ -110,7 +113,7 @@ exam-read-aloud/
 ├── SKILL.md              # 給 Claude 的工作流程說明
 ├── scripts/
 │   ├── build.py          # 主程式：PDF／Word／圖片 → 報讀版 HTML
-│   ├── make_index.py     # 多份考卷的首頁產生器
+│   ├── make_index.py     # 多份考卷的首頁產生器（可加密碼）
 │   ├── word2pdf.ps1      # Word 轉 PDF（Microsoft Word／LibreOffice）
 │   └── ocr.ps1           # Windows 內建 OCR
 └── assets/
